@@ -235,6 +235,32 @@ try:
                         f_col2.metric("Sentiment", f"{df_latest['Sentiment'].iloc[-1]:.2f}")
                         f_col3.metric("MA (10)", f"${df_latest['MA_10'].iloc[-1]:.2f}")
                         f_col4.metric("Volatility", f"{df_latest['Volatility'].iloc[-1]:.4f}")
+
+                        # --- Real-Time News Analysis (New Feature) ---
+                        st.markdown("---")
+                        st.subheader("📰 Real-Time News Analysis")
+                        
+                        analyzer = SentimentAnalyzer()
+                        with st.spinner(f"Fetching latest news for {ticker}..."):
+                            news_score, headlines = analyzer.fetch_news_sentiment(ticker)
+                        
+                        n_col1, n_col2 = st.columns([1, 2])
+                        with n_col1:
+                            st.metric("Live News Sentiment", f"{news_score:.2f}", 
+                                      delta="Bullish" if news_score > 0.05 else "Bearish" if news_score < -0.05 else "Neutral")
+                            
+                            if news_score > 0.05:
+                                st.success("Market sentiment is **Bullish** based on recent news.")
+                            elif news_score < -0.05:
+                                st.error("Market sentiment is **Bearish** based on recent news.")
+                            else:
+                                st.info("Market sentiment is **Neutral**.")
+                                
+                        with n_col2:
+                            st.markdown("**Top Headlines:**")
+                            for h in headlines[:5]:
+                                st.markdown(f"- {h}")
+                        st.markdown("---")
                         
                         # --- Recent Accuracy (Backtest on view) ---
                         st.markdown("### 🔍 Recent Model Accuracy (Last 30 Days)")

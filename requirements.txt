@@ -10,3 +10,6 @@ seaborn
 vaderSentiment
 typing_extensions
 joblib
+newsapi-python
+beautifulsoup4
+requests
