@@ -13,3 +13,4 @@ newsapi-python
 beautifulsoup4
 requests
 alpaca-trade-api
+websockets>=12.0
