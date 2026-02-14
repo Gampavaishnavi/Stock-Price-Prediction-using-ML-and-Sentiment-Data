@@ -46,6 +46,33 @@ def load_models():
 try:
     st.sidebar.header("User Input")
     
+    # --- BROKER INTEGRATION (Paper Trading) ---
+    with st.sidebar.expander("🔌 Connect Broker (Paper Trading)"):
+        alpaca_key = st.text_input("Alpaca Key ID", type="password")
+        alpaca_secret = st.text_input("Alpaca Secret Key", type="password")
+        connect_broker = st.button("Connect to Alpaca")
+        
+        if connect_broker:
+            if alpaca_key and alpaca_secret:
+                try:
+                    from agent.broker import AlpacaBroker
+                    st.session_state['broker'] = AlpacaBroker(alpaca_key, alpaca_secret)
+                    st.success("Connected to Alpaca Paper Trading!")
+                    st.session_state['simulation_mode'] = False
+                except Exception as e:
+                    st.error(f"Connection Failed: {e}")
+            else:
+                st.warning("Please enter both Key ID and Secret.")
+    
+    # Check Broker Status
+    broker = st.session_state.get('broker', None)
+    if broker:
+        st.sidebar.success("🟢 Broker Connected")
+        mode = st.sidebar.radio("Trading Mode", ["Paper Trading", "Simulation"])
+        st.session_state['simulation_mode'] = (mode == "Simulation")
+    else:
+        st.session_state['simulation_mode'] = True
+    
     # Popular Tickers List
     POPULAR_TICKERS = [
         "AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "META", "NVDA", "NFLX", 
@@ -89,6 +116,12 @@ except Exception as e:
 
 # --- Main Application Logic ---
 try:
+    # --- NEWS SENTIMENT INTEGRATION ---
+    with st.sidebar.expander("📰 News Settings (Real-Time)"):
+        news_api_key = st.text_input("NewsAPI Key (Optional)", type="password")
+        if news_api_key:
+            os.environ["NEWS_API_KEY"] = news_api_key
+    
     # --- Main Page ---
     st.title("📈 QuantEdge: Stock Prediction System")
 
@@ -96,8 +129,6 @@ try:
     @st.cache_data
     def load_data(ticker, start, end):
         # Fetch extra data for technical indicators and model context (warm-up period)
-        # MA_50 requires 50 days. Input to model requires 60 days.
-        # Buffer 100 days to be safe.
         start_buffer = start - timedelta(days=100)
         df = download_data(ticker, start_buffer, end)
         df = add_technical_indicators(df)
@@ -139,11 +170,38 @@ try:
         except Exception:
             st.warning(f"Could not load data for comparison ticker: {compare_ticker}")
 
+    # --- LIVE SENTIMENT FETCH ---
+    analyzer = SentimentAnalyzer()
+    live_sentiment, headlines = analyzer.fetch_news_sentiment(ticker)
+    
     # --- Tabs ---
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["Overview", "Prediction", "Trading Signal", "Model Performance", "Agent Portfolio"])
 
     with tab1:
         st.subheader(f"{ticker} Stock Overview")
+        
+        # Display Live Sentiment
+        s_col1, s_col2 = st.columns([1, 2])
+        with s_col1:
+            sentiment_color = "green" if live_sentiment > 0.05 else "red" if live_sentiment < -0.05 else "gray"
+            st.markdown(f"### Live Sentiment")
+            st.markdown(f"<h2 style='color: {sentiment_color}'>{live_sentiment:.2f}</h2>", unsafe_allow_html=True)
+            if live_sentiment > 0.05:
+                st.write("Market is **Bullish** 🐂")
+            elif live_sentiment < -0.05:
+                st.write("Market is **Bearish** 🐻")
+            else:
+                st.write("Market is **Neutral** 😐")
+        
+        with s_col2:
+            with st.expander("📰 Latest Headlines (NewsAPI / FinViz)", expanded=False):
+                if headlines:
+                    for h in headlines[:5]:
+                        st.write(f"• {h}")
+                else:
+                    st.info("No headlines found.")
+        
+        st.markdown("---")
         if df is not None:
             # Filter data for display logic ONLY
             # This allows the model (Tab 2) to use the full buffered history
@@ -153,16 +211,24 @@ try:
                 mask = (df_display['Date'].dt.date >= start_date) & (df_display['Date'].dt.date <= end_date)
                 df_display = df_display.loc[mask]
                 
-            # Candlestick Chart
+            # Candlestick Chart (with optional BB)
             fig = go.Figure()
             
-            # Main Stock
+            # 1. Main Price & Bollinger Bands
             fig.add_trace(go.Candlestick(x=df_display['Date'],
                             open=df_display['Open'],
                             high=df_display['High'],
                             low=df_display['Low'],
                             close=df_display['Close'],
                             name=ticker))
+            
+            # Bollinger Bands Toggle
+            show_bb = st.checkbox("Show Bollinger Bands", value=False)
+            if show_bb and 'BB_Upper' in df_display.columns:
+                fig.add_trace(go.Scatter(x=df_display['Date'], y=df_display['BB_Upper'], 
+                                         line=dict(color='gray', width=1), name='Upper BB', showlegend=False))
+                fig.add_trace(go.Scatter(x=df_display['Date'], y=df_display['BB_Lower'], 
+                                         line=dict(color='gray', width=1), name='Lower BB', fill='tonexty', fillcolor='rgba(128,128,128,0.1)'))
             
             # Comparison Stock (Line Chart)
             if df_compare is not None and not df_compare.empty:
@@ -176,8 +242,22 @@ try:
                                          mode='lines', name=f'{compare_ticker} Close', 
                                          line=dict(color='orange', width=2)))
                 
-            fig.update_layout(title=f'{ticker} Stock Price', xaxis_rangeslider_visible=False)
+            fig.update_layout(title=f'{ticker} Stock Price', xaxis_rangeslider_visible=False, height=500)
             st.plotly_chart(fig, use_container_width=True)
+            
+            # 2. MACD Chart
+            if 'MACD' in df_display.columns:
+                st.subheader("MACD Oscillator")
+                fig_macd = go.Figure()
+                fig_macd.add_trace(go.Scatter(x=df_display['Date'], y=df_display['MACD'], name='MACD', line=dict(color='blue')))
+                fig_macd.add_trace(go.Scatter(x=df_display['Date'], y=df_display['Signal_Line'], name='Signal', line=dict(color='orange')))
+                
+                # Color histogram based on positive/negative
+                colors = np.where(df_display['MACD'] - df_display['Signal_Line'] > 0, 'green', 'red')
+                fig_macd.add_trace(go.Bar(x=df_display['Date'], y=df_display['MACD'] - df_display['Signal_Line'], name='Histogram', marker_color=colors))
+                
+                fig_macd.update_layout(height=300, xaxis_title="Date", yaxis_title="MACD", showlegend=True)
+                st.plotly_chart(fig_macd, use_container_width=True)
             
             # Raw Data
             if st.checkbox("Show Raw Data"):
@@ -348,11 +428,50 @@ try:
                 """, unsafe_allow_html=True)
                 
             with col_sig2:
+                # Gauge Chart for Confidence
+                fig_gauge = go.Figure(go.Indicator(
+                    mode = "gauge+number",
+                    value = confidence * 100,
+                    domain = {'x': [0, 1], 'y': [0, 1]},
+                    title = {'text': "Confidence (%)"},
+                    gauge = {'axis': {'range': [0, 100]},
+                             'bar': {'color': "darkblue"},
+                             'steps' : [
+                                 {'range': [0, 50], 'color': "lightgray"},
+                                 {'range': [50, 80], 'color': "gray"}]}))
+                st.plotly_chart(fig_gauge, use_container_width=True)
                 st.markdown("### ⚡ Execute Trade")
-                st.write(f"**Current Balance:** ${st.session_state.agent.balance:,.2f}")
-                st.write(f"**Holdings:** {st.session_state.agent.holdings} shares")
                 
-                # Trade Action Buttons
+                # Determine Mode & Data
+                sim_mode = st.session_state.get('simulation_mode', True)
+                broker = st.session_state.get('broker', None)
+                
+                current_bal = 0.0
+                current_pos = 0
+                mode_label = "Simulation"
+                
+                if sim_mode:
+                    current_bal = st.session_state.agent.balance
+                    current_pos = st.session_state.agent.holdings
+                    mode_label = "Simulation"
+                else:
+                    try:
+                        current_bal = float(broker.get_balance())
+                        # Need to find position for this specific ticker
+                        positions = broker.get_positions()
+                        for p in positions:
+                            if p.symbol == ticker:
+                                current_pos = int(p.qty)
+                                break
+                        mode_label = "Paper Trading"
+                    except:
+                        current_bal = 0.0
+                        current_pos = 0
+                        mode_label = "Error (Check Broker)"
+                
+                st.write(f"**Mode:** {mode_label}")
+                st.write(f"**Available Cash:** ${current_bal:,.2f}")
+                st.write(f"**Holdings:** {current_pos} shares")
                 
                 # Message Container
                 msg_container = st.empty()
@@ -365,7 +484,7 @@ try:
                     
                     with col_ord1:
                         # Max shares affordable
-                        max_buy = int(st.session_state.agent.balance // current_price)
+                        max_buy = int(current_bal // current_price) if current_price > 0 else 0
                         qty = st.number_input("Quantity", min_value=1, max_value=10000, value=1, step=1)
                     
                     with col_ord2:
@@ -380,31 +499,47 @@ try:
                     
                     if submitted_buy:
                         cost = qty * current_price
-                        if st.session_state.agent.balance >= cost:
-                            # Fetch current volatility and sentiment
+                        if current_bal >= cost:
+                            # Fetch current volatility
                             vol = df.iloc[-1]['Volatility'] if 'Volatility' in df.columns else 0.0
-                            sent = df.iloc[-1]['Sentiment'] if 'Sentiment' in df.columns else 0.0
+                            # Use Live Sentiment
+                            sent = live_sentiment
                             
-                            st.session_state.agent.execute_trade(df.iloc[-1]['Date'], "BUY", current_price, reason, quantity=qty, volatility=vol, sentiment=sent)
-                            msg_container.success(f"✅ BOUGHT {qty} shares of {ticker} at ${current_price:.2f}!")
+                            if sim_mode:
+                                st.session_state.agent.execute_trade(df.iloc[-1]['Date'], "BUY", current_price, reason, quantity=qty, volatility=vol, sentiment=sent)
+                                msg_container.success(f"✅ SIM: BOUGHT {qty} shares of {ticker} at ${current_price:.2f}!")
+                            else:
+                                order = broker.submit_order(ticker, qty, 'buy')
+                                if order:
+                                    msg_container.success(f"🚀 PAPER: Order Sent to Buy {qty} shares of {ticker}!")
+                                else:
+                                    msg_container.error("Order Failed to Submit.")
                             st.rerun()
                         else:
                             msg_container.error(f"Insufficient Funds! Max you can buy is {max_buy}.")
                             
                     if submitted_sell:
-                        if st.session_state.agent.holdings >= qty:
-                            # Fetch current volatility and sentiment
+                        if current_pos >= qty:
+                            # Fetch current volatility
                             vol = df.iloc[-1]['Volatility'] if 'Volatility' in df.columns else 0.0
-                            sent = df.iloc[-1]['Sentiment'] if 'Sentiment' in df.columns else 0.0
+                            # Use Live Sentiment
+                            sent = live_sentiment
                             
-                            st.session_state.agent.execute_trade(df.iloc[-1]['Date'], "SELL", current_price, reason, quantity=qty, volatility=vol, sentiment=sent)
-                            msg_container.success(f"✅ SOLD {qty} shares of {ticker} at ${current_price:.2f}!")
+                            if sim_mode:
+                                st.session_state.agent.execute_trade(df.iloc[-1]['Date'], "SELL", current_price, reason, quantity=qty, volatility=vol, sentiment=sent)
+                                msg_container.success(f"✅ SIM: SOLD {qty} shares of {ticker} at ${current_price:.2f}!")
+                            else:
+                                order = broker.submit_order(ticker, qty, 'sell')
+                                if order:
+                                    msg_container.success(f"🚀 PAPER: Order Sent to Sell {qty} shares!")
+                                else:
+                                    msg_container.error("Order Failed to Submit.")
                             st.rerun()
                         else:
-                            msg_container.error(f"Insufficient Holdings! You only have {st.session_state.agent.holdings} shares.")
+                            msg_container.error(f"Insufficient Holdings! You only have {current_pos} shares.")
                 
-                # Show tiny portfolio summary if trades exist
-                if st.session_state.agent.trade_history:
+                # Show tiny portfolio summary if trades exist (Sim only for now in this view, expanded in dashboard)
+                if sim_mode and st.session_state.agent.trade_history:
                     st.markdown("---")
                     st.write("### 💼 Portfolio Update")
                     p_col1, p_col2 = st.columns(2)
@@ -526,44 +661,94 @@ try:
     with tab5:
         st.subheader("📊 Live Portfolio Dashboard")
         
-        # --- Live Metrics ---
-        current_price = df['Close'].iloc[-1]
-        portfolio_value = st.session_state.agent.balance + (st.session_state.agent.holdings * current_price)
-        profit_loss = portfolio_value - st.session_state.agent.initial_balance
-        roi = (profit_loss / st.session_state.agent.initial_balance) * 100
+        # Determine Mode
+        sim_mode = st.session_state.get('simulation_mode', True)
+        broker = st.session_state.get('broker', None)
         
-        total_trades = len(st.session_state.agent.trade_history)
+        # --- Live Metrics ---
+        if sim_mode:
+            current_price = df['Close'].iloc[-1]
+            portfolio_value = st.session_state.agent.balance + (st.session_state.agent.holdings * current_price)
+            profit_loss = portfolio_value - st.session_state.agent.initial_balance
+            roi = (profit_loss / st.session_state.agent.initial_balance) * 100
+            cash_balance = st.session_state.agent.balance
+            total_trades = len(st.session_state.agent.trade_history)
+        else:
+            # Broker Data
+            try:
+                portfolio_value = float(broker.get_equity())
+                cash_balance = float(broker.get_balance())
+                # For P/L, we can't easily know initial balance unless hardcoded or fetched from history API (complex)
+                # We'll assume 100k for Paper Trading default, or just show daily P/L if available (Alpaca has it)
+                # usage: account.equity - account.last_equity ? 
+                # For now, just show current equity as primary metric.
+                profit_loss = 0.0 # Placeholder
+                roi = 0.0
+                total_trades = "N/A"
+            except:
+                portfolio_value = 0.0
+                cash_balance = 0.0
+                profit_loss = 0.0
+                roi = 0.0
+                total_trades = "Err"
 
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Net Worth", f"${portfolio_value:,.2f}")
-        m2.metric("Total Profit/Loss", f"${profit_loss:,.2f}", f"{roi:.2f}%")
-        m3.metric("Cash Balance", f"${st.session_state.agent.balance:,.2f}")
-        m4.metric("Total Trades", total_trades)
+        m2.metric("Cash Balance", f"${cash_balance:,.2f}")
+        if sim_mode:
+            m3.metric("Total Profit/Loss", f"${profit_loss:,.2f}", f"{roi:.2f}%")
+            m4.metric("Total Trades", total_trades)
+        else:
+            m3.metric("Buying Power", f"${float(broker.api.get_account().buying_power):,.2f}" if broker else "$0")
+            m4.metric("Status", broker.account.status if broker and hasattr(broker, 'account') else "Disconnected")
 
         # --- Visuals ---
         col_viz1, col_viz2 = st.columns(2)
         
-        with col_viz1:
-            st.markdown("### 🥧 Asset Allocation")
-            # Pie Chart: Cash vs Stock
-            stock_value = st.session_state.agent.holdings * current_price
-            cash_value = st.session_state.agent.balance
-            
-            fig_alloc = go.Figure(data=[go.Pie(labels=['Cash', 'Stock'], values=[cash_value, stock_value], hole=.3)])
-            fig_alloc.update_layout(height=300, margin=dict(l=20, r=20, t=20, b=20))
-            st.plotly_chart(fig_alloc, use_container_width=True)
-            
-        with col_viz2:
-            st.markdown("### 📈 Portfolio History")
-            # History Line Chart
-            history_df = st.session_state.agent.get_portfolio_history()
-            if not history_df.empty:
-                fig_hist = go.Figure()
-                fig_hist.add_trace(go.Scatter(x=history_df['Date'], y=history_df['Portfolio_Value'], mode='lines', name='Net Worth', fill='tozeroy'))
-                fig_hist.update_layout(height=300, margin=dict(l=20, r=20, t=20, b=20), xaxis_title="Date", yaxis_title="Value ($)")
-                st.plotly_chart(fig_hist, use_container_width=True)
-            else:
-                st.info("No trading history yet. Make some trades!")
+        if sim_mode:
+            with col_viz1:
+                st.markdown("### 🥧 Asset Allocation")
+                # Pie Chart: Cash vs Stock
+                stock_value = st.session_state.agent.holdings * current_price
+                cash_value = st.session_state.agent.balance
+                
+                fig_alloc = go.Figure(data=[go.Pie(labels=['Cash', 'Stock'], values=[cash_value, stock_value], hole=.3)])
+                fig_alloc.update_layout(height=300, margin=dict(l=20, r=20, t=20, b=20))
+                st.plotly_chart(fig_alloc, use_container_width=True)
+                
+            with col_viz2:
+                st.markdown("### 📈 Portfolio History")
+                # History Line Chart
+                history_df = st.session_state.agent.get_portfolio_history()
+                if not history_df.empty:
+                    fig_hist = go.Figure()
+                    fig_hist.add_trace(go.Scatter(x=history_df['Date'], y=history_df['Portfolio_Value'], mode='lines', name='Net Worth', fill='tozeroy'))
+                    fig_hist.update_layout(height=300, margin=dict(l=20, r=20, t=20, b=20), xaxis_title="Date", yaxis_title="Value ($)")
+                    st.plotly_chart(fig_hist, use_container_width=True)
+                else:
+                    st.info("No trading history yet. Make some trades!")
+        else:
+            # Broker Mode Visuals
+            st.markdown("### 📋 Open Positions (Alpaca)")
+            try:
+                positions = broker.get_positions()
+                if positions:
+                    # Convert to DataFrame for display
+                    pos_data = []
+                    for p in positions:
+                        pos_data.append({
+                            "Symbol": p.symbol,
+                            "Qty": p.qty,
+                            "Entry Price": f"${float(p.avg_entry_price):.2f}",
+                            "Current Price": f"${float(p.current_price):.2f}",
+                            "Market Value": f"${float(p.market_value):.2f}",
+                            "P/L": f"${float(p.unrealized_pl):.2f}"
+                        })
+                    st.dataframe(pd.DataFrame(pos_data), use_container_width=True)
+                else:
+                    st.info("No open positions.")
+            except Exception as e:
+                st.error(f"Error fetching positions: {e}")
 
         # --- Live Trade Log ---
         st.markdown("### 📜 Trade Log")

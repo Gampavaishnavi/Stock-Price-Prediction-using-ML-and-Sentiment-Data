@@ -12,3 +12,4 @@ joblib
 newsapi-python
 beautifulsoup4
 requests
+alpaca-trade-api

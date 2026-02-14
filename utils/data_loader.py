@@ -89,6 +89,18 @@ def add_technical_indicators(df):
     
     # RSI
     df['RSI'] = calculate_rsi(df)
+
+    # MACD (12, 26, 9)
+    df['EMA_12'] = df['Close'].ewm(span=12, adjust=False).mean()
+    df['EMA_26'] = df['Close'].ewm(span=26, adjust=False).mean()
+    df['MACD'] = df['EMA_12'] - df['EMA_26']
+    df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
+    
+    # Bollinger Bands (20, 2)
+    df['BB_Middle'] = df['Close'].rolling(window=20).mean()
+    df['BB_Std'] = df['Close'].rolling(window=20).std()
+    df['BB_Upper'] = df['BB_Middle'] + (2 * df['BB_Std'])
+    df['BB_Lower'] = df['BB_Middle'] - (2 * df['BB_Std'])
     
     # Drop NaN values created by rolling windows
     df.dropna(inplace=True)
