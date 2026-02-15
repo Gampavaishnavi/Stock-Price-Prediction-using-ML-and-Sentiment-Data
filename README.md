@@ -34,6 +34,10 @@ A professional AI-powered stock prediction and trading dashboard.
 
 - Python
 - Streamlit
+
+https://github.com/user-attachments/assets/262ec5dc-ae26-4600-81bf-dd32183ee08e
+
+
 - Scikit-Learn (MLP Regressor)
 - Plotly (Interactive Charts)
 - yfinance (Market Data)
